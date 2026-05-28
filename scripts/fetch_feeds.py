@@ -818,7 +818,7 @@ def fetch_link_pattern_source(
             print(f"  [WARN] Could not fetch sitemap for {source_name}: {e}", file=sys.stderr)
             return []
 
-        sitemap_soup = BeautifulSoup(r.content, "xml")
+        sitemap_soup = BeautifulSoup(r.content, "html.parser")
         candidates: list[tuple[str, str, datetime | None]] = []  # (url, title_hint, lastmod)
         for url_tag in sitemap_soup.find_all("url"):
             loc = url_tag.find("loc")

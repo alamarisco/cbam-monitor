@@ -254,11 +254,10 @@ LINK_PATTERN_SOURCES: dict[str, dict] = {
     },
     "BeZero Carbon": {
         "type": "free",
-        "listing_url": "https://bezerocarbon.com/insights",
         "base_url": "https://bezerocarbon.com",
-        # Match /insights/slug
-        "link_pattern": re.compile(r"^/insights/[a-z0-9][^/]*$"),
-        "skip_date_filter": True,
+        # Listing page is JS-rendered (only 2 static articles) — use sitemap instead
+        "sitemap_url": "https://bezerocarbon.com/sitemap.xml",
+        "link_pattern": re.compile(r"https://bezerocarbon\.com/insights/[a-z0-9][^?#]*$"),
     },
 }
 
@@ -743,24 +742,108 @@ def fetch_link_pattern_source(
     debug: bool = False,
 ) -> list[dict]:
     """
-    Scrape a site with no RSS by:
-      1. Fetching the listing page and collecting article URLs by href regex.
-      2. Keyword-filtering titles from the listing page (avoids fetching every article).
-      3. Fetching individual article pages (up to MAX_DETAIL_FETCHES) for
-         date, full title, and summary.
+    Scrape a site with no RSS. Two URL-discovery modes:
+
+    Sitemap mode (config has 'sitemap_url'):
+      Parses sitemap XML for article URLs + lastmod dates. More reliable than
+      scraping listing pages that use client-side rendering.
+
+    Listing-page mode (config has 'listing_url'):
+      Fetches the listing page and collects article hrefs by regex pattern.
     """
     if not HAS_REQUESTS:
         print(f"  [WARN] requests/BeautifulSoup not installed — skipping {source_name}", file=sys.stderr)
         return []
 
     source_type      = config["type"]
-    listing_url      = config["listing_url"]
-    base_url         = config["base_url"]
+    base_url         = config.get("base_url", "")
     link_pat         = config["link_pattern"]
     skip_date_filter = config.get("skip_date_filter", False)
     articles: list[dict] = []
 
-    # ── Step 1: fetch listing page ────────────────────────────────────────
+    # ── Mode A: sitemap-based URL discovery ──────────────────────────────
+    if "sitemap_url" in config:
+        try:
+            r = requests.get(config["sitemap_url"], headers=HTTP_HEADERS, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"  [WARN] Could not fetch sitemap for {source_name}: {e}", file=sys.stderr)
+            return []
+
+        sitemap_soup = BeautifulSoup(r.content, "xml")
+        candidates: list[tuple[str, str, datetime | None]] = []  # (url, title_hint, lastmod)
+        for url_tag in sitemap_soup.find_all("url"):
+            loc = url_tag.find("loc")
+            lastmod_tag = url_tag.find("lastmod")
+            if not loc:
+                continue
+            full_url = loc.text.strip()
+            if not link_pat.match(full_url) or full_url in seen_urls:
+                continue
+            lastmod: datetime | None = None
+            if lastmod_tag:
+                try:
+                    lastmod = datetime.fromisoformat(
+                        lastmod_tag.text.strip().replace("Z", "+00:00")
+                    ).astimezone(timezone.utc)
+                except ValueError:
+                    pass
+            candidates.append((full_url, "", lastmod))
+
+        # Sort by lastmod descending (most recent first); unknowns go last
+        candidates.sort(key=lambda x: x[2] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        print(f"    sitemap: {len(candidates)} candidate URLs found", file=sys.stderr)
+
+        fetched = 0
+        for article_url, _, lastmod in candidates:
+            if fetched >= MAX_DETAIL_FETCHES:
+                break
+            # Use lastmod as quick date filter before fetching the page
+            if not skip_date_filter and lastmod and lastmod < cutoff:
+                if debug:
+                    print(f"      [DEBUG] too old (lastmod): {article_url} ({lastmod.date()})", file=sys.stderr)
+                continue
+
+            time.sleep(SCRAPE_DELAY)
+            try:
+                ar = requests.get(article_url, headers=HTTP_HEADERS, timeout=REQUEST_TIMEOUT)
+                ar.raise_for_status()
+            except Exception as e:
+                if debug:
+                    print(f"      [DEBUG] fetch failed {article_url}: {e}", file=sys.stderr)
+                continue
+
+            fetched += 1
+            asoup = BeautifulSoup(ar.text, "html.parser")
+            title   = _extract_article_title(asoup) or ""
+            summary = _extract_article_summary(asoup)
+            pub_date = lastmod or _extract_article_date(asoup) or datetime.now(tz=timezone.utc)
+
+            if not title:
+                continue
+
+            search_text = f"{title} {summary}"
+            matched = matches_keywords(search_text)
+
+            if not matched:
+                if debug:
+                    print(f"      [DEBUG] no keyword match: {title[:80]}", file=sys.stderr)
+                continue
+
+            seen_urls.add(article_url)
+            articles.append(make_article(
+                source_name, source_type, title, summary, article_url, pub_date, matched
+            ))
+
+        print(
+            f"    fetched {fetched} pages → {len(articles)} matched",
+            file=sys.stderr,
+        )
+        return articles
+
+    # ── Mode B: listing-page URL discovery ───────────────────────────────
+    listing_url = config["listing_url"]
+
     try:
         r = requests.get(listing_url, headers=HTTP_HEADERS, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
@@ -770,13 +853,10 @@ def fetch_link_pattern_source(
 
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # ── Step 2: collect candidate article URLs ────────────────────────────
-    # Walk all <a href="…"> tags; keep those matching link_pattern
-    candidates: list[tuple[str, str]] = []   # (full_url, anchor_text)
+    candidates_b: list[tuple[str, str]] = []   # (full_url, anchor_text)
     seen_hrefs: set = set()
     for a_tag in soup.find_all("a", href=True):
         href: str = a_tag["href"].strip()
-        # Normalise: strip query strings and fragments
         href = href.split("?")[0].split("#")[0].rstrip("/")
         if not href or href in seen_hrefs:
             continue
@@ -784,19 +864,18 @@ def fetch_link_pattern_source(
             full_url = base_url + href
             if full_url not in seen_urls:
                 anchor_text = a_tag.get_text(" ", strip=True)
-                candidates.append((full_url, anchor_text))
+                candidates_b.append((full_url, anchor_text))
                 seen_hrefs.add(href)
 
-    print(f"    listing: {len(candidates)} candidate links found", file=sys.stderr)
+    print(f"    listing: {len(candidates_b)} candidate links found", file=sys.stderr)
 
-    if not candidates:
+    if not candidates_b:
         return []
 
     # ── Step 3: keyword-filter on anchor text first ───────────────────────
-    # This avoids fetching article pages that clearly have nothing to do with CBAM
     kw_filtered: list[tuple[str, str]] = []
     title_matched: list[tuple[str, str]] = []
-    for url, anchor in candidates:
+    for url, anchor in candidates_b:
         if matches_keywords(anchor):
             title_matched.append((url, anchor))
         else:
@@ -970,7 +1049,8 @@ def fetch_all(
         all_articles.extend(articles)
 
     for source_name, config in LINK_PATTERN_SOURCES.items():
-        print(f"[SCRAPE] {source_name} ({config['listing_url']})...", file=sys.stderr)
+        source_label = config.get("sitemap_url", config.get("listing_url", ""))
+        print(f"[SCRAPE] {source_name} ({source_label})...", file=sys.stderr)
         articles = fetch_link_pattern_source(
             source_name, config, cutoff, seen_urls, debug=debug
         )

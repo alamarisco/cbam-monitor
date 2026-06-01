@@ -12,8 +12,10 @@ Data sources:
                    Carbon Market Watch, Climate Home News, E3G, Sandbag, Ember Climate,
                    Clear Blue Markets, Politico Europe (energy section),
                    中央社 CNA, 聯合新聞網 UDN, 經濟日報 Economic Daily, 環境資訊中心 e-info
-  Free (scraped) — Sylvera (sylvera.com/blog), BeZero Carbon (bezerocarbon.com/insights)
-                   Both confirmed SSR (May 2026); link-pattern scraper, no JS needed.
+  Free (scraped) — Sylvera (sylvera.com/blog), BeZero Carbon (bezerocarbon.com/insights),
+                   今週刊 ESG (esg.businesstoday.com.tw)
+  Paid (scraped) — 天下雜誌 CommonWealth (cw.com.tw — 永續發展 section; preview only)
+                   All confirmed SSR; link-pattern scraper, no JS needed.
   Paid (RSS)     — Financial Times, Nikkei Asia, Bloomberg Green
   Dead (removed) — Reuters (all RSS feeds shut down May 2026)
 
@@ -301,6 +303,23 @@ LINK_PATTERN_SOURCES: dict[str, dict] = {
         # Listing page is JS-rendered (only 2 static articles) — use sitemap instead
         "sitemap_url": "https://bezerocarbon.com/sitemap.xml",
         "link_pattern": re.compile(r"https://bezerocarbon\.com/insights/[a-z0-9][^?#]*$"),
+    },
+    "今週刊 ESG": {
+        "type": "free",
+        "listing_url": "https://esg.businesstoday.com.tw",
+        "base_url": "https://esg.businesstoday.com.tw",
+        # Absolute URLs in static HTML; date embedded as YYYYMMDD in post ID
+        "link_pattern": re.compile(
+            r"https://esg\.businesstoday\.com\.tw/article/category/\d+/post/\d{12}"
+        ),
+        "date_from_url_regex": r"/post/(?P<date>\d{8})",
+    },
+    "天下雜誌 CommonWealth": {
+        "type": "paid",
+        "listing_url": "https://www.cw.com.tw/subchannel.action?idSubChannel=607",
+        "base_url": "https://www.cw.com.tw",
+        # Absolute URLs; date from JSON-LD datePublished on article pages
+        "link_pattern": re.compile(r"https://www\.cw\.com\.tw/article/\d+$"),
     },
 }
 
@@ -942,7 +961,8 @@ def fetch_link_pattern_source(
         if not href or href in seen_hrefs:
             continue
         if link_pat.match(href):
-            full_url = base_url + href
+            # Support both absolute hrefs (http://…) and relative paths (/slug)
+            full_url = href if href.startswith("http") else base_url + href
             if full_url not in seen_urls:
                 anchor_text = a_tag.get_text(" ", strip=True)
                 candidates_b.append((full_url, anchor_text))
@@ -966,10 +986,27 @@ def fetch_link_pattern_source(
     ordered = title_matched + kw_filtered
 
     # ── Step 4: fetch individual article pages ────────────────────────────
+    date_from_url_pat = config.get("date_from_url_regex")
     fetched = 0
     for article_url, anchor_text in ordered:
         if fetched >= MAX_DETAIL_FETCHES:
             break
+
+        # Pre-filter by date embedded in URL (avoids fetching old pages)
+        url_pub_date: datetime | None = None
+        if date_from_url_pat:
+            m = re.search(date_from_url_pat, article_url)
+            if m:
+                try:
+                    url_pub_date = datetime.strptime(
+                        m.group("date"), "%Y%m%d"
+                    ).replace(tzinfo=timezone.utc)
+                    if not skip_date_filter and url_pub_date < cutoff:
+                        if debug:
+                            print(f"      [DEBUG] too old (url date): {article_url}", file=sys.stderr)
+                        continue
+                except Exception:
+                    pass
 
         time.sleep(SCRAPE_DELAY)
         try:
@@ -984,9 +1021,7 @@ def fetch_link_pattern_source(
         asoup = BeautifulSoup(ar.text, "html.parser")
 
         # Date check — skip articles outside lookback window (unless skip_date_filter set)
-        pub_date = _extract_article_date(asoup)
-        if pub_date is None:
-            pub_date = datetime.now(tz=timezone.utc)
+        pub_date = _extract_article_date(asoup) or url_pub_date or datetime.now(tz=timezone.utc)
         if not skip_date_filter and pub_date < cutoff:
             if debug:
                 print(f"      [DEBUG] too old: {article_url} ({pub_date.date()})", file=sys.stderr)
@@ -1275,8 +1310,8 @@ def format_html(articles: list[dict], run_time: str) -> str:
     Carbon Markets Global Monitor &middot; Weekly Edition<br/>
     Sources: Euractiv · Carbon Brief · Carbon Pulse · Carbon Market Watch ·
     Climate Home News · Politico Europe · E3G · Sandbag · Ember Energy ·
-    Clear Blue Markets · Sylvera · BeZero Carbon · CNA · UDN · Economic Daily ·
-    環境資訊中心 · FT · Nikkei Asia · Bloomberg Green
+    Clear Blue Markets · Sylvera · BeZero Carbon · 今週刊 ESG · CNA · UDN ·
+    Economic Daily · 環境資訊中心 · 天下雜誌 · FT · Nikkei Asia · Bloomberg Green
   </div>
 </body></html>"""
 

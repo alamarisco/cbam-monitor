@@ -69,7 +69,11 @@ STRONG_SIGNALS = [
     "cement decarbon", "safeguard", "保障措施", "關稅配額",
 ]
 TAIWAN_BUCKET = ["taiwan carbon", "台灣碳"]
-EVERGREEN_PAT = re.compile(r"^(what is|what's)\b|: your guide|\bexplained\b|your guide", re.I)
+EVERGREEN_PAT = re.compile(
+    r"^(what is|what's)\b|: your guide|\bexplained\b|your guide"
+    r"|大哉問|懶人包|一次看|圖解|教戰守則|一文看懂|是什麼",
+    re.I
+)
 DEFAULT_MAXAGE_DAYS = 4
 
 
@@ -134,6 +138,20 @@ def load_seen(path):
     return set(json.load(open(path, encoding="utf-8")).get("urls", []))
 
 
+def load_portal_seen(path):
+    if not path or not os.path.exists(path):
+        return set()
+    try:
+        return set(json.load(open(path, encoding="utf-8")).get("urls", []))
+    except Exception:
+        return set()
+
+
+def save_portal_seen(path, seen_set):
+    data = {"updated": datetime.date.today().isoformat(), "urls": sorted(seen_set)}
+    json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+
+
 def load_queue_urls(path):
     if not path or not os.path.exists(path):
         return set()
@@ -145,6 +163,9 @@ def main():
     ap.add_argument("--articles", required=True)
     ap.add_argument("--portals", default="")
     ap.add_argument("--seen", required=True)
+    ap.add_argument("--portal-seen", default="state/portal_seen.json",
+                    dest="portal_seen",
+                    help="portal dedup ledger — portal URLs seen here are suppressed")
     ap.add_argument("--queue", default="")
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--date", default=None)
@@ -166,9 +187,10 @@ def main():
         arts = portal_items + arts
 
     seen = load_seen(a.seen) | load_queue_urls(a.queue)
+    portal_seen = load_portal_seen(a.portal_seen)
 
     kept = {}
-    dropped_dupe = dropped_old = dropped_evergreen = 0
+    dropped_dupe = dropped_old = dropped_evergreen = dropped_portal_dupe = 0
     for art in arts:
         url = (art.get("link") or art.get("url") or "").strip()
         title = art.get("title", "")
@@ -181,11 +203,19 @@ def main():
         if src == "DG TAXUD CBAM" and "/news/" not in url:
             dropped_evergreen += 1
             continue
-        # 2) drop stale items — portal sources exempt (official docs don't expire)
+        # 2) portal dedup — suppress items already shown in a prior run
+        if src in PORTAL_SOURCES and url in portal_seen:
+            dropped_portal_dupe += 1
+            continue
+        # 3) drop stale items — portal sources exempt (official docs don't expire)
         if pub10 and pub10 < cutoff and src not in PORTAL_SOURCES:
             dropped_old += 1
             continue
-        # 3) drop evergreen "what is X / your guide" explainer pages
+        # 3b) no date on a non-portal scraped item → treat as stale
+        if not pub10 and src not in PORTAL_SOURCES:
+            dropped_old += 1
+            continue
+        # 4) drop evergreen "what is X / your guide" explainer pages
         if is_evergreen(title, summ):
             dropped_evergreen += 1
             continue
@@ -214,10 +244,16 @@ def main():
     stream_a.sort(key=lambda i: TIER_ORDER.get(i["tier"], 9))
     stream_b.sort(key=lambda i: i["published"], reverse=True)
 
+    # Persist portal URLs seen this run so they don't surface as TOP every day
+    new_portal_urls = {it["url"] for it in items if it.get("source") in PORTAL_SOURCES}
+    if new_portal_urls:
+        save_portal_seen(a.portal_seen, portal_seen | new_portal_urls)
+
     json.dump(
         {"date": run_date, "stream_a": stream_a, "stream_b": stream_b,
          "stats": {"a": len(stream_a), "b": len(stream_b), "dupes_collapsed": dropped_dupe,
-                   "dropped_stale": dropped_old, "dropped_evergreen": dropped_evergreen}},
+                   "dropped_stale": dropped_old, "dropped_evergreen": dropped_evergreen,
+                   "dropped_portal_repeat": dropped_portal_dupe}},
         open(os.path.join(a.outdir, "candidates.json"), "w", encoding="utf-8"),
         ensure_ascii=False, indent=2)
 
@@ -230,7 +266,8 @@ def main():
     nm = sum(1 for i in stream_a if i["tier"] == "MED")
     print(f"[RADAR] {run_date}: Stream A {len(stream_a)} (TOP {nt}, HIGH {nh}, MED {nm}) · "
           f"Stream B {len(stream_b)} · {dropped_dupe} dupes · "
-          f"{dropped_old} stale · {dropped_evergreen} evergreen dropped")
+          f"{dropped_old} stale · {dropped_evergreen} evergreen · "
+          f"{dropped_portal_dupe} portal repeats suppressed")
     print(f"[OUT] {a.outdir}")
 
 

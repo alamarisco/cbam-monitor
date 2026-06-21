@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       hours:
-        description: "Hours lookback (blank = auto: 66 on Monday catch-up, else 25)"
+        description: "Hours lookback (blank = auto: 66 on Monday, else 25)"
         required: false
         default: ""
   repository_dispatch:
@@ -32,34 +32,53 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r requirements.txt
+
       - name: Determine lookback window
         id: lb
         run: |
           if [ -n "${{ github.event.inputs.hours }}" ]; then
             echo "HOURS=${{ github.event.inputs.hours }}" >> "$GITHUB_OUTPUT"
-          elif [ "$(date -u +%u)" = "1" ] && [ "$(date -u +%H)" = "01" ]; then
+          elif [ "$(date -u +%u)" = "1" ]; then
             echo "HOURS=66" >> "$GITHUB_OUTPUT"
           else
             echo "HOURS=25" >> "$GITHUB_OUTPUT"
           fi
+
       - name: Fetch articles → JSON
         run: |
           mkdir -p data
           python scripts/fetch_feeds.py --hours ${{ steps.lb.outputs.HOURS }} --format json --output data/latest.json
           cp data/latest.json "data/$(TZ='Asia/Taipei' date +%Y-%m-%d_%H%M).json"
-      - name: RADAR triage
-        run: |
-          DATE="$(TZ='Asia/Taipei' date +%F)"
-          mkdir -p data/radar
-          python radar/scripts/radar_process.py --articles data/latest.json --seen state/seen_urls.json --outdir data/radar --date "$DATE"
-          cp "data/radar/triage_${DATE}.html" data/radar/triage_latest.html || true
+          ls data/????-??-??_????.json 2>/dev/null | sort -r | tail -n +31 | xargs rm -f || true
+
       - name: Heartbeat
         run: TZ='Asia/Taipei' date +'%Y-%m-%d %H:%M %Z' > data/last_run.txt
-      - name: Commit & push data
+
+      - name: Commit fetch data
         run: |
           git config user.name  "cbam-monitor-bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data state
-          git commit -m "data+radar: $(TZ='Asia/Taipei' date +%Y-%m-%d_%H%M) (lookback ${{ steps.lb.outputs.HOURS }}h)" || exit 0
+          git add data/latest.json data/last_run.txt
+          find data -maxdepth 1 -name '????-??-??_????.json' | xargs git add || true
+          git commit -m "data: $(TZ='Asia/Taipei' date +%Y-%m-%d_%H%M) (lookback ${{ steps.lb.outputs.HOURS }}h)" || exit 0
+          git pull --rebase origin main
+          git push
+
+      - name: RADAR triage
+        continue-on-error: true
+        run: |
+          DATE="$(TZ='Asia/Taipei' date +%F)"
+          mkdir -p data/radar
+          python radar/scripts/radar_process.py \
+            --articles data/latest.json \
+            --seen state/seen_urls.json \
+            --portal-seen state/portal_seen.json \
+            --outdir data/radar --date "$DATE"
+          cp "data/radar/triage_${DATE}.html" data/radar/triage_latest.html || true
+
+      - name: Commit RADAR outputs
+        run: |
+          git add data/radar state/portal_seen.json
+          git commit -m "radar: $(TZ='Asia/Taipei' date +%Y-%m-%d_%H%M)" || exit 0
           git pull --rebase origin main
           git push

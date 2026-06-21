@@ -928,7 +928,7 @@ def make_article(
     title: str,
     summary: str,
     link: str,
-    pub_date: datetime,
+    pub_date: "datetime | None",
     matched: list[str],
 ) -> dict:
     topic = classify_topic(matched)
@@ -938,7 +938,7 @@ def make_article(
         "title": title,
         "summary": summary[:MAX_SUMMARY_LEN] if source_type == "free" else "",
         "link": link,
-        "published": pub_date.isoformat(),
+        "published": pub_date.isoformat() if pub_date else "",
         "matched_keywords": matched[:8],
         "topic": topic,
     }
@@ -1151,7 +1151,9 @@ def fetch_link_pattern_source(
             asoup = BeautifulSoup(ar.text, "html.parser")
             title   = _extract_article_title(asoup) or ""
             summary = _extract_article_summary(asoup)
-            pub_date = lastmod or _extract_article_date(asoup) or datetime.now(tz=timezone.utc)
+            pub_date = lastmod or _extract_article_date(asoup)
+            if pub_date is None and not skip_date_filter:
+                continue  # no date on a non-portal item → treat as stale
 
             if not title:
                 continue
@@ -1258,8 +1260,13 @@ def fetch_link_pattern_source(
         asoup = BeautifulSoup(ar.text, "html.parser")
 
         # Date check — skip articles outside lookback window (unless skip_date_filter set)
-        pub_date = _extract_article_date(asoup) or url_pub_date or datetime.now(tz=timezone.utc)
-        if not skip_date_filter and pub_date < cutoff:
+        pub_date = _extract_article_date(asoup) or url_pub_date
+        if pub_date is None:
+            if not skip_date_filter:
+                if debug:
+                    print(f"      [DEBUG] no date found, skipping: {article_url}", file=sys.stderr)
+                continue  # no date on a non-portal item → treat as stale
+        elif not skip_date_filter and pub_date < cutoff:
             if debug:
                 print(f"      [DEBUG] too old: {article_url} ({pub_date.date()})", file=sys.stderr)
             continue

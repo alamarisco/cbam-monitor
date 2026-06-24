@@ -93,6 +93,22 @@ original date.)
 
 For each picked URL:
 
+0. **Resolve an openable source first (paywalled picks).** Several feeds give a headline +
+   short summary but lock the full article: **Carbon Pulse**, Financial Times, Nikkei Asia,
+   Bloomberg, and sometimes S&P Global. If the picked item is from one of these (or any page you
+   cannot fully read), do **not** translate from the snippet — `WebSearch` the same story from an
+   openable outlet and switch to it before translating:
+   - Search the headline's key facts (e.g. `EU CBAM draft rules onerous importers June 2026`),
+     preferring `reference/sources.md` names that are openable: GMK Center, S&P Global (free
+     items), Euractiv, EUROMETAL, Reuters/AP reprints, Argus, Montel, official EU/UK pages.
+   - **Verify it's the same story, not just the same topic:** same event/announcement, same key
+     figures, and a publication date within ~1–2 days of the Carbon Pulse item (watch the
+     republish-date trap in COMPILE Step 2.5).
+   - Translate, cite (`新聞出處`/LINE 來源), and ledger the **openable** URL. Add the original
+     Carbon Pulse URL to the dedup ledger too (FLAG step 5) so it won't resurface.
+   - If no openable equivalent exists, translate from the Carbon Pulse headline + summary only,
+     keep it short, and note `（僅摘要，原文需訂閱）` so Alec knows it's snippet-based.
+
 1. **Translate** to Traditional Chinese, ESTC house style, full article (not a summary).
    For multi-section pieces, use **bold sub-headers** — but **do NOT bold body text**. Keep
    figures, company names, official titles, CN codes accurate.

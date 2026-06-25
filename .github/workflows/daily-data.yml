@@ -2,8 +2,10 @@ name: CBAM Monitor — Daily Data Feed
 
 on:
   schedule:
-    - cron: "7 8 * * 1-5"   # weekdays 16:07 Taipei — off-peak minute
-    - cron: "7 1 * * 1"     # Monday 09:07 Taipei — weekend catch-up
+    - cron: "7 8 * * 1-5"    # weekdays 16:07 Taipei — primary (off-peak minute)
+    - cron: "30 9 * * 1-5"   # weekdays 17:30 Taipei — backup 1 (GitHub cron is best-effort)
+    - cron: "0 11 * * 1-5"   # weekdays 19:00 Taipei — backup 2
+    - cron: "7 1 * * 1"      # Monday 09:07 Taipei — weekend catch-up
   workflow_dispatch:
     inputs:
       hours:
@@ -26,16 +28,37 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Skip backups if already ran today
+        id: guard
+        run: |
+          # Manual / repository_dispatch runs always proceed. Scheduled backups no-op if
+          # data/last_run.txt already shows today's Taipei date (the primary run succeeded).
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "run=yes" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          TODAY="$(TZ='Asia/Taipei' date +%F)"
+          if [ -f data/last_run.txt ] && grep -q "$TODAY" data/last_run.txt; then
+            echo "Already ran today ($TODAY) — skipping this scheduled backup."
+            echo "run=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "No run yet today ($TODAY) — proceeding."
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Python
+        if: steps.guard.outputs.run == 'yes'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
       - name: Install dependencies
+        if: steps.guard.outputs.run == 'yes'
         run: pip install -r requirements.txt
 
       - name: Determine lookback window
         id: lb
+        if: steps.guard.outputs.run == 'yes'
         run: |
           if [ -n "${{ github.event.inputs.hours }}" ]; then
             echo "HOURS=${{ github.event.inputs.hours }}" >> "$GITHUB_OUTPUT"
@@ -46,6 +69,7 @@ jobs:
           fi
 
       - name: Fetch articles → JSON
+        if: steps.guard.outputs.run == 'yes'
         run: |
           mkdir -p data
           python scripts/fetch_feeds.py --hours ${{ steps.lb.outputs.HOURS }} --format json --output data/latest.json
@@ -53,9 +77,11 @@ jobs:
           ls data/????-??-??_????.json 2>/dev/null | sort -r | tail -n +31 | xargs rm -f || true
 
       - name: Heartbeat
+        if: steps.guard.outputs.run == 'yes'
         run: TZ='Asia/Taipei' date +'%Y-%m-%d %H:%M %Z' > data/last_run.txt
 
       - name: Commit fetch data
+        if: steps.guard.outputs.run == 'yes'
         run: |
           git config user.name  "cbam-monitor-bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -66,6 +92,7 @@ jobs:
           git push
 
       - name: RADAR triage
+        if: steps.guard.outputs.run == 'yes'
         continue-on-error: true
         run: |
           DATE="$(TZ='Asia/Taipei' date +%F)"
@@ -78,6 +105,7 @@ jobs:
           cp "data/radar/triage_${DATE}.html" data/radar/triage_latest.html || true
 
       - name: Commit RADAR outputs
+        if: steps.guard.outputs.run == 'yes'
         run: |
           git add data/radar state/portal_seen.json
           git commit -m "radar: $(TZ='Asia/Taipei' date +%Y-%m-%d_%H%M)" || exit 0
